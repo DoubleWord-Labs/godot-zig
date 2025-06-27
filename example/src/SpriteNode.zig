@@ -31,7 +31,7 @@ pub fn _ready(self: *Self) void {
 
     const resource_loader = ResourceLoader.getSingleton();
     const tex = resource_loader.load("res://textures/logo.png", "", ResourceLoader.CACHE_MODE_REUSE);
-    defer _ = godot.unreference(tex.?);
+    defer _ = tex.?.unreference();
 
     const sz = self.base.getParentAreaSize();
 

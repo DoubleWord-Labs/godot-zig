@@ -25,7 +25,7 @@ pub fn _enter_tree(self: *Self) void {
     const res_name = String.initFromLatin1Chars("res://textures/logo.png");
     const texture = resource_loader.load(res_name, "", ResourceLoader.CACHE_MODE_REUSE);
     if (texture) |tex| {
-        defer _ = godot.unreference(tex);
+        defer _ = tex.unreference();
         self.sprite = Sprite2D.init();
         self.sprite.setTexture(tex);
         self.sprite.setPosition(Vector2.new(400, 300));

@@ -1,14 +1,6 @@
 const std = @import("std");
 
 pub const c = @import("gdextension");
-pub const core = @import("bindings/core.zig");
-pub const global = @import("bindings/core.zig").global;
-
-pub const support = @import("support.zig");
-pub const Variant = @import("Variant.zig").Variant;
-
-pub var general_allocator: std.mem.Allocator = undefined;
-
 const Vector = @import("vector");
 pub const Vector2 = Vector.Vector2;
 pub const Vector2i = Vector.Vector2i;
@@ -16,6 +8,16 @@ pub const Vector3 = Vector.Vector3;
 pub const Vector3i = Vector.Vector3i;
 pub const Vector4 = Vector.Vector4;
 pub const Vector4i = Vector.Vector4i;
+
+pub const core = @import("bindings/core.zig");
+pub const global = @import("bindings/core.zig").global;
+pub const debug = @import("debug.zig");
+pub const heap = @import("heap.zig");
+pub const meta = @import("meta.zig");
+pub const support = @import("support.zig");
+pub const Variant = @import("Variant.zig").Variant;
+
+pub var general_allocator: std.mem.Allocator = undefined;
 
 pub var dummy_callbacks = c.GDExtensionInstanceBindingCallbacks{ .create_callback = instanceBindingCreateCallback, .free_callback = instanceBindingFreeCallback, .reference_callback = instanceBindingReferenceCallback };
 pub fn instanceBindingCreateCallback(_: ?*anyopaque, _: ?*anyopaque) callconv(.C) ?*anyopaque {
@@ -32,12 +34,6 @@ pub fn getObjectFromInstance(comptime T: type, obj: c.GDExtensionObjectPtr) ?*T 
         return @ptrCast(@alignCast(r));
     } else {
         return null;
-    }
-}
-
-pub fn unreference(refcounted_obj: anytype) void {
-    if (refcounted_obj.unreference()) {
-        core.objectDestroy(refcounted_obj.godot_object);
     }
 }
 
@@ -76,52 +72,6 @@ fn getBaseName(str: []const u8) []const u8 {
     return str[pos + 1 ..];
 }
 
-const max_align_t = c_longdouble;
-const SIZE_OFFSET: usize = 0;
-const ELEMENT_OFFSET = if ((SIZE_OFFSET + @sizeOf(u64)) % @alignOf(u64) == 0) (SIZE_OFFSET + @sizeOf(u64)) else ((SIZE_OFFSET + @sizeOf(u64)) + @alignOf(u64) - ((SIZE_OFFSET + @sizeOf(u64)) % @alignOf(u64)));
-const DATA_OFFSET = if ((ELEMENT_OFFSET + @sizeOf(u64)) % @alignOf(max_align_t) == 0) (ELEMENT_OFFSET + @sizeOf(u64)) else ((ELEMENT_OFFSET + @sizeOf(u64)) + @alignOf(max_align_t) - ((ELEMENT_OFFSET + @sizeOf(u64)) % @alignOf(max_align_t)));
-
-pub fn alloc(size: u32) ?[*]u8 {
-    if (@import("builtin").mode == .Debug) {
-        const p: [*c]u8 = @ptrCast(core.memAlloc(size));
-        return p;
-    } else {
-        const p: [*c]u8 = @ptrCast(core.memAlloc(size + DATA_OFFSET));
-        return @ptrCast(&p[DATA_OFFSET]);
-    }
-}
-
-pub fn free(ptr: ?*anyopaque) void {
-    if (ptr) |p| {
-        core.memFree(p);
-    }
-}
-
-pub fn getGodotObjectPtr(inst: anytype) *const ?*anyopaque {
-    const typeInfo = @typeInfo(@TypeOf(inst));
-    if (typeInfo != .pointer) {
-        @compileError("pointer required");
-    }
-    const T = typeInfo.pointer.child;
-    if (@hasField(T, "godot_object")) {
-        return &inst.godot_object;
-    } else if (@hasField(T, "base")) {
-        return getGodotObjectPtr(&inst.base);
-    }
-}
-
-pub fn cast(comptime T: type, inst: anytype) ?T {
-    if (@typeInfo(@TypeOf(inst)) == .optional) {
-        if (inst) |i| {
-            return .{ .godot_object = i.godot_object };
-        } else {
-            return null;
-        }
-    } else {
-        return .{ .godot_object = inst.godot_object };
-    }
-}
-
 pub fn castSafe(comptime TargetType: type, object: anytype) ?TargetType {
     const classTag = core.classdbGetClassTag(@ptrCast(getClassName(TargetType)));
     const casted = core.objectCastTo(object.godot_object, classTag);
@@ -129,39 +79,6 @@ pub fn castSafe(comptime TargetType: type, object: anytype) ?TargetType {
         return TargetType{ .godot_object = obj };
     }
     return null;
-}
-
-pub fn create(comptime T: type) !*T {
-    const self = try general_allocator.create(T);
-    self.base = .{ .godot_object = core.classdbConstructObject2(@ptrCast(getParentClassName(T))) };
-    core.objectSetInstance(self.base.godot_object, @ptrCast(getClassName(T)), @ptrCast(self));
-    core.objectSetInstanceBinding(self.base.godot_object, core.p_library, @ptrCast(self), @ptrCast(&dummy_callbacks));
-    if (@hasDecl(T, "init")) {
-        self.init();
-    }
-    return self;
-}
-
-//for extension reloading
-fn recreate(comptime T: type, obj: ?*anyopaque) !*T {
-    const self = try general_allocator.create(T);
-    self.* = std.mem.zeroInit(T, .{});
-    self.base = .{ .godot_object = obj };
-    core.objectSetInstance(self.base.godot_object, @ptrCast(getClassName(T)), @ptrCast(self));
-    core.objectSetInstanceBinding(self.base.godot_object, core.p_library, @ptrCast(self), @ptrCast(&dummy_callbacks));
-    if (@hasDecl(T, "init")) {
-        self.init();
-    }
-    return self;
-}
-
-pub fn destroy(instance: anytype) void {
-    if (@hasField(@TypeOf(instance), "godot_object")) {
-        core.objectFreeInstanceBinding(instance.godot_object, core.p_library);
-        core.objectDestroy(instance.godot_object);
-    } else {
-        @compileError("only engine object can be destroyed");
-    }
 }
 
 const PluginCallback = ?*const fn (userdata: ?*anyopaque, p_level: c.GDExtensionInitializationLevel) void;
@@ -288,7 +205,7 @@ pub fn registerClass(comptime T: type) void {
 
                 const count: u32 = @intCast(property_list.len);
 
-                const propertyies: [*c]c.GDExtensionPropertyInfo = @ptrCast(@alignCast(alloc(@sizeOf(c.GDExtensionPropertyInfo) * count)));
+                const propertyies: [*c]c.GDExtensionPropertyInfo = @ptrCast(@alignCast(heap.alloc(@sizeOf(c.GDExtensionPropertyInfo) * count)));
                 for (property_list, 0..) |*property, i| {
                     propertyies[i].type = property.type;
                     propertyies[i].hint = property.hint;
@@ -316,7 +233,7 @@ pub fn registerClass(comptime T: type) void {
                 }
             }
             if (p_list) |list| {
-                free(@ptrCast(@constCast(list)));
+                heap.free(@ptrCast(@constCast(list)));
             }
         }
 
@@ -327,7 +244,7 @@ pub fn registerClass(comptime T: type) void {
                 }
             }
             if (p_list) |list| {
-                free(@ptrCast(@constCast(list)));
+                heap.free(@ptrCast(@constCast(list)));
             }
         }
 
@@ -381,13 +298,13 @@ pub fn registerClass(comptime T: type) void {
 
         pub fn createInstanceBind(p_userdata: ?*anyopaque) callconv(.C) c.GDExtensionObjectPtr {
             _ = p_userdata;
-            const ret = create(T) catch unreachable;
+            const ret = heap.create(T) catch unreachable;
             return @ptrCast(ret.base.godot_object);
         }
 
         pub fn recreateInstanceBind(p_class_userdata: ?*anyopaque, p_object: c.GDExtensionObjectPtr) callconv(.C) c.GDExtensionClassInstancePtr {
             _ = p_class_userdata;
-            const ret = recreate(T, p_object) catch unreachable;
+            const ret = heap.recreate(T, p_object.?) catch unreachable;
             return @ptrCast(ret);
         }
 
@@ -482,9 +399,9 @@ pub fn MethodBinderT(comptime MethodType: type) type {
                 .@"struct" => {
                     if (@hasDecl(T, "reference") and @hasDecl(T, "unreference")) { //RefCounted
                         const obj = core.refGetObject(p_arg);
-                        return .{ .godot_object = obj };
+                        return @bitCast(core.Object{ .ptr = obj });
                     } else if (@hasField(T, "godot_object")) {
-                        return .{ .godot_object = p_arg };
+                        return @bitCast(core.Object{ .ptr = p_arg });
                     } else {
                         return @as(*T, @ptrCast(@constCast(@alignCast(p_arg)))).*;
                     }
@@ -674,3 +591,11 @@ pub const PropertyInfo = struct {
         };
     }
 };
+
+comptime {
+    _ = debug;
+    _ = heap;
+    _ = meta;
+    _ = support;
+    _ = Variant;
+}

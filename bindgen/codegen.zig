@@ -253,10 +253,17 @@ fn generateClass(w: *Writer, class: GodotApi.Class, ctx: *Context) !void {
 
     try w.printLine("pub const {s} = extern struct {{", .{class.name});
     w.indent += 1;
-    try w.writeLine(
-        \\pub const Self = @This();
-        \\godot_object: ?*anyopaque,
-    );
+    if (class.inherits.len > 0) {
+        try w.printLine(
+            \\const Self = @This();
+            \\base: {s},
+        , .{class.inherits});
+    } else {
+        try w.writeLine(
+            \\const Self = @This();
+            \\ptr: *anyopaque,
+        );
+    }
     try generateClassEnums(w, class);
     try generateClassConstants(w, class);
     if (class.findMethod("init") == null) {
@@ -408,7 +415,7 @@ fn generateClassSingleton(w: *Writer, name: []const u8, generated_method_map: *S
         \\pub fn getSingleton() {0s} {{
         \\    if (instance == null) {{
         \\        const obj = godot.core.globalGetSingleton(@ptrCast(godot.getClassName({0s})));
-        \\        instance = .{{ .godot_object = obj }};
+        \\        instance = @bitCast(Object {{ .ptr = obj.? }});
         \\    }}
         \\    return instance.?;
         \\}}
@@ -613,9 +620,9 @@ fn generateProc(w: *Writer, fn_node: anytype, class_name: []const u8, func_name:
         for (args.items, arg_types.items, 0..) |arg, arg_type, i| {
             if (ctx.isClass(arg_types.items[i])) {
                 try w.printLine(
-                    \\if(@typeInfo(@TypeOf({1s})) == .@"struct") {{ args[{0d}] = @ptrCast(godot.getGodotObjectPtr(&{1s})); }}
-                    \\else if(@typeInfo(@TypeOf({1s})) == .optional) {{ args[{0d}] = @ptrCast(godot.getGodotObjectPtr(&{1s}.?)); }}
-                    \\else if(@typeInfo(@TypeOf({1s})) == .pointer) {{ args[{0d}] = @ptrCast(godot.getGodotObjectPtr({1s})); }}
+                    \\if(@typeInfo(@TypeOf({1s})) == .@"struct") {{ args[{0d}] = @ptrCast(godot.meta.asObjectPtr(&{1s})); }}
+                    \\else if(@typeInfo(@TypeOf({1s})) == .optional) {{ args[{0d}] = @ptrCast(godot.meta.asObjectPtr(&{1s}.?)); }}
+                    \\else if(@typeInfo(@TypeOf({1s})) == .pointer) {{ args[{0d}] = @ptrCast(godot.meta.asObjectPtr({1s})); }}
                     \\else {{ args[{0d}] = null; }}
                 , .{ i, arg });
             } else {
@@ -647,7 +654,7 @@ fn generateProc(w: *Writer, fn_node: anytype, class_name: []const u8, func_name:
             });
         },
         .ClassMethod => {
-            const self_ptr = if (is_static) "null" else "@ptrCast(godot.getGodotObjectPtr(self).*)";
+            const self_ptr = if (is_static) "null" else "@ptrCast(godot.meta.asObjectPtr(self))";
 
             try w.printLine("const method = godot.support.bindClassMethod({s}, \"{s}\", {d});", .{
                 class_name,
@@ -667,9 +674,9 @@ fn generateProc(w: *Writer, fn_node: anytype, class_name: []const u8, func_name:
                 }
             } else {
                 if (ctx.isClass(return_type)) {
-                    try w.writeLine("var godot_object:?*anyopaque = null;");
-                    try w.printLine("godot.core.objectMethodBindPtrcall(method, {s}, {s}, @ptrCast(&godot_object));", .{ self_ptr, arg_array });
-                    try w.printLine("result = {s}{{ .godot_object = godot_object }};", .{util.childType(return_type)});
+                    try w.writeLine("var ptr: ?*anyopaque = null;");
+                    try w.printLine("godot.core.objectMethodBindPtrcall(method, {s}, {s}, @ptrCast(&ptr));", .{ self_ptr, arg_array });
+                    try w.writeLine("result = @bitCast(Object { .ptr = ptr.? });");
                 } else {
                     try w.printLine("godot.core.objectMethodBindPtrcall(method, {s}, {s}, {s});", .{ self_ptr, arg_array, result_string });
                 }
@@ -812,9 +819,9 @@ fn generateCore(ctx: *Context) !void {
     for (ctx.all_engine_classes.items) |cls| {
         const constructor_code =
             \\pub fn init{0s}() {0s} {{
-            \\    return .{{
-            \\        .godot_object = godot.core.classdbConstructObject(@ptrCast(godot.getClassName({0s})))
-            \\    }};
+            \\    return @bitCast(Object {{
+            \\        .ptr = godot.core.classdbConstructObject(@ptrCast(godot.getClassName({0s}))).?,
+            \\    }});
             \\}}
         ;
         if (!ctx.isSingleton(cls)) {

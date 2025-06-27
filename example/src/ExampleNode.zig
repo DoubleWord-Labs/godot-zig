@@ -48,7 +48,7 @@ pub fn _process(self: *Self, delta: f64) void {
 
 fn clear_scene(self: *Self) void {
     if (self.example_node) |n| {
-        godot.destroy(n);
+        godot.heap.destroy(n);
         //n.queue_free(); //ok
     }
 }
@@ -65,7 +65,7 @@ pub fn on_item_focused(self: *Self, idx: i64) void {
     self.clear_scene();
     switch (idx) {
         inline 0...Examples.len - 1 => |i| {
-            const n = godot.create(Examples[i].T) catch unreachable;
+            const n = godot.heap.create(Examples[i].T) catch unreachable;
             self.example_node = godot.cast(Node, n.base);
             self.panel.addChild(self.example_node, false, Node.INTERNAL_MODE_DISABLED);
             self.panel.grabFocus();
