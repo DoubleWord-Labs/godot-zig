@@ -7,6 +7,7 @@ pub const Flag = @import("Context/Flag.zig");
 pub const Field = @import("Context/Field.zig");
 pub const Function = @import("Context/Function.zig");
 pub const Imports = @import("Context/Imports.zig");
+pub const Interface = @import("Context/Interface.zig");
 pub const Module = @import("Context/Module.zig");
 pub const Type = @import("Context/type.zig").Type;
 
@@ -33,6 +34,7 @@ builtins: StringArrayHashMap(Builtin) = .empty,
 builtin_sizes: StringArrayHashMap(struct { size: usize, members: StringArrayHashMap(struct { offset: usize, meta: []const u8 }) }) = .empty,
 enums: StringArrayHashMap(Enum) = .empty,
 flags: StringArrayHashMap(Flag) = .empty,
+interface: Interface = .empty,
 modules: StringArrayHashMap(Module) = .empty,
 
 const func_case: case.Case = .camel;
@@ -157,6 +159,9 @@ fn collectImports(self: *Context, allocator: Allocator) !void {
     }
     for (self.api.utility_functions) |function| {
         try self.collectFunctionImports(allocator, function);
+    }
+    for (self.all_engine_classes.items) |class| {
+        try self.interface.imports.put(self.allocator, class);
     }
 }
 
@@ -295,7 +300,7 @@ fn parseGdExtensionHeaders(self: *Context) !void {
         if (std.mem.indexOf(u8, line, "/*")) |i| if (i >= 0) {
             doc_start = doc_stream.items.len;
 
-            if (line.len <= 3) {
+            if (line.len <= 4) {
                 continue;
             }
         };
@@ -305,9 +310,9 @@ fn parseGdExtensionHeaders(self: *Context) !void {
             const is_last_line = std.mem.containsAtLeast(u8, line, 1, "*/");
 
             if (line.len > 0) {
-                @memcpy(doc_line_buf[0 .. line.len - 2], line[2..]);
-                var doc_line = doc_line_buf[0 .. line.len - 2];
+                @memcpy(doc_line_buf[0 .. @max(line.len, 3) - 3], line[@min(line.len, 3)..]);
 
+                var doc_line = doc_line_buf[0 .. @max(line.len, 3) - 3];
                 if (is_last_line) {
                     // remove the trailing "*/"
                     const len = std.mem.replace(u8, doc_line, "*/", "", &doc_line_temp);
@@ -315,13 +320,12 @@ fn parseGdExtensionHeaders(self: *Context) !void {
                 }
 
                 if (!contains_name_doc and !(is_last_line and doc_line.len == 0)) {
-                    try doc_writer.writeAll("/// ");
                     try doc_writer.writeAll(try self.allocator.dupe(u8, doc_line));
                     try doc_writer.writeAll("\n");
                 }
 
                 if (is_last_line) {
-                    doc_end = doc_stream.items.len;
+                    doc_end = doc_stream.items.len - 1;
                 }
             }
         }
@@ -350,12 +354,23 @@ fn parseGdExtensionHeaders(self: *Context) !void {
         }
 
         if (fn_name) |_| if (fp_type) |_| {
-            try self.func_pointers.put(self.allocator, fp_type.?, fn_name.?);
-
-            if (doc_start) |start_index| if (doc_end) |end_index| {
-                const doc_text = try self.allocator.dupe(u8, doc_stream.items[start_index..end_index]);
-                try self.func_docs.put(self.allocator, fp_type.?, doc_text);
+            const docs: ?[]const u8 = blk: {
+                if (doc_start) |start_index| {
+                    if (doc_end) |end_index| {
+                        break :blk try self.allocator.dupe(u8, doc_stream.items[start_index..end_index]);
+                    }
+                }
+                break :blk null;
             };
+
+            try self.func_docs.put(self.allocator, fp_type.?, docs.?);
+            try self.func_pointers.put(self.allocator, fp_type.?, fn_name.?);
+            try self.interface.functions.append(self.allocator, .{
+                .docs = docs,
+                .name = try case.allocTo(self.allocator, .camel, fn_name.?),
+                .api_name = fn_name.?,
+                .ptr_type = fp_type.?,
+            });
 
             fn_name = null;
             fp_type = null;

@@ -1,6 +1,7 @@
 pub fn generate(ctx: *Context) !void {
     try writeBuiltins(ctx);
     try writeGlobalEnums(ctx);
+    try writeInterface(ctx);
     try writeModules(ctx);
 
     try generateClasses(ctx);
@@ -1049,6 +1050,117 @@ fn generateCore(ctx: *Context) !void {
 
     try buf.flush();
     try file.sync();
+}
+
+fn writeInterface(ctx: *Context) !void {
+    const file = try ctx.config.output.createFile("Interface.zig", .{});
+    defer file.close();
+
+    var buf = bufferedWriter(file.writer());
+    var w = codeWriter(buf.writer().any());
+
+    try w.writeLine(
+        \\const Interface = @This();
+        \\
+    );
+    try w.writeLine(
+        \\library: Child(godot.c.GDExtensionClassLibraryPtr),
+        \\
+    );
+
+    for (ctx.interface.functions.items) |function| {
+        try writeDocBlock(&w, function.docs);
+        try w.printLine(
+            \\{s}: gdext.{s},
+            \\
+        , .{ function.name, function.ptr_type });
+    }
+
+    try writeInterfaceInit(&w, ctx);
+
+    try w.writeLine(
+        \\
+        \\pub fn getName(_: Interface, comptime T: type) StringName {
+        \\    const ptr = getPtr(T);
+        \\    if (ptr.name == null) {
+        \\        ptr.name = StringName.fromComptimeLatin1(blk: {
+        \\            const raw = @as([:0]const u8, @typeName(T));
+        \\            if (std.mem.lastIndexOfScalar(u8, raw, '.')) |split| {
+        \\                break :blk raw[split + 1 ..];
+        \\            } else {
+        \\                break :blk raw;
+        \\            }
+        \\        });
+        \\    }
+        \\    return ptr.name.?;
+        \\}
+        \\
+        \\fn getPtr(comptime T: type) *?StringName {
+        \\    return &struct {
+        \\        comptime {
+        \\            _ = T;
+        \\        }
+        \\        var name: ?StringName = null;
+        \\    }.name;
+        \\}
+        \\
+        \\const std = @import("std");
+        \\const Child = std.meta.Child;
+        \\
+        \\const gdext = @import("gdextension");
+        \\const StringName = @import("StringName.zig");
+    );
+
+    try writeImports(&w, &ctx.interface.imports);
+
+    try buf.flush();
+    try file.sync();
+}
+
+fn writeInterfaceInit(w: *Writer, ctx: *Context) !void {
+    try w.writeLine("pub fn init(getProcAddress: Child(gdext.GDExtensionInterfaceGetProcAddress), library: gdext.GDExtensionClassLibraryPtr) !Interface {");
+    w.indent += 1;
+
+    try w.writeLine(
+        \\const self: Interface = .{
+        \\    .library = library,
+    );
+    w.indent += 1;
+
+    for (ctx.interface.functions.items) |function| {
+        try w.printLine(
+            \\.{s} = @ptrCast(getProcAddress("{s}")),
+        , .{ function.name, function.api_name });
+    }
+
+    w.indent -= 1;
+    try w.writeLine(
+        \\};
+        \\
+    );
+
+    try w.writeLine(
+        \\inline for (&.{
+    );
+    w.indent += 1;
+    for (ctx.all_engine_classes.items) |cls| {
+        try w.printLine(
+            \\.{{ {0s}, "{0s}" }},
+        , .{cls});
+    }
+    w.indent -= 1;
+    try w.writeLine(
+        \\}) |pair| {
+        \\  self.stringNameNewWithLatin1Chars(@ptrCast(getPtr(pair[0])), @ptrCast(pair[1]), true);
+        \\}
+    );
+
+    w.indent -= 1;
+    try w.writeLine(
+        \\
+        \\    return self;
+        \\}
+    );
 }
 
 pub const ProcType = enum {
