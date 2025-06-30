@@ -1,3 +1,5 @@
+const GodotApi = @This();
+
 header: Header,
 builtin_class_sizes: []BuiltinSize,
 builtin_class_member_offsets: []BuiltinMemberOffset,
@@ -129,13 +131,15 @@ pub const Class = struct {
     name: []const u8,
     is_refcounted: bool,
     is_instantiable: bool,
-    inherits: []const u8 = "",
+    inherits: ?[]const u8,
     api_type: []const u8,
+
     constants: ?[]Constant = null,
     enums: ?[]Enum = null,
     methods: ?[]Method = null,
-    signals: ?[]Signal = null,
     properties: ?[]Property = null,
+    signals: ?[]Signal = null,
+
     brief_description: ?[]const u8,
     description: ?[]const u8,
 
@@ -163,17 +167,8 @@ pub const Class = struct {
         value: i64,
     };
 
-    pub const Enum = struct {
-        name: []const u8,
-        is_bitfield: bool,
-        values: []Value,
-
-        pub const Value = struct {
-            name: []const u8,
-            value: i64,
-            description: ?[]const u8 = null,
-        };
-    };
+    // The schemas are identical.
+    pub const Enum = GlobalEnum;
 
     pub const Method = struct {
         name: []const u8,
@@ -263,9 +258,12 @@ pub const UtilityFunction = struct {
     };
 };
 
-pub fn findClass(self: @This(), name: []const u8) ?Class {
+pub fn findClass(self: @This(), name: ?[]const u8) ?Class {
+    if (name == null) {
+        return null;
+    }
     for (self.classes) |class| {
-        if (std.mem.eql(u8, class.name, name)) {
+        if (std.mem.eql(u8, class.name, name.?)) {
             return class;
         }
     }
@@ -301,10 +299,22 @@ pub const Type = union(enum) {
 
 // TODO: handle in Context
 pub fn findParent(self: @This(), class: Class) ?Class {
-    if (class.inherits.len == 0) {
+    if (class.inherits == null) {
         return null;
     }
     return self.findClass(class.inherits);
 }
 
+pub fn parseFromReader(arena: *ArenaAllocator, reader: AnyReader) !Parsed(GodotApi) {
+    var parser: Parser = .init;
+    var document = try parser.parseFromReader(arena.allocator(), reader);
+    return try document.as(GodotApi, arena.allocator(), .{});
+}
+
+const Parsed = std.json.Parsed;
+const AnyReader = std.io.AnyReader;
+const ArenaAllocator = std.heap.ArenaAllocator;
+const Parser = zimdjson.ondemand.FullParser(.default);
+
 const std = @import("std");
+const zimdjson = @import("zimdjson");

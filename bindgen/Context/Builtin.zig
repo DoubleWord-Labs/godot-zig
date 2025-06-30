@@ -16,7 +16,7 @@ methods: StringHashMap(Function) = .empty,
 
 imports: Imports = .empty,
 
-pub fn init(allocator: Allocator, api: GodotApi.Builtin, ctx: *const Context) !Builtin {
+pub fn fromApi(allocator: Allocator, api: GodotApi.Builtin, ctx: *const Context) !Builtin {
     var self: Builtin = .{};
     errdefer self.deinit(allocator);
 
@@ -29,7 +29,7 @@ pub fn init(allocator: Allocator, api: GodotApi.Builtin, ctx: *const Context) !B
     };
     self.api_name = api.name;
     self.size = size_config.size;
-    self.doc = if (api.description) |desc| try docs.convertDocsToMarkdown(allocator, desc, ctx) else null;
+    self.doc = if (api.description) |desc| try docs.convertDocsToMarkdown(allocator, desc, ctx, .{}) else null;
     self.has_destructor = api.has_destructor;
 
     for (api.constants orelse &.{}) |constant| {
@@ -69,7 +69,7 @@ pub fn init(allocator: Allocator, api: GodotApi.Builtin, ctx: *const Context) !B
     }
 
     for (api.methods orelse &.{}) |method| {
-        try self.methods.put(allocator, method.name, try Function.fromBuiltinMethod(allocator, method, ctx));
+        try self.methods.put(allocator, method.name, try Function.fromBuiltinMethod(allocator, self.name, method, ctx));
     }
 
     return self;
@@ -108,6 +108,8 @@ pub fn deinit(self: *Builtin, allocator: Allocator) void {
     self.methods.deinit(allocator);
 
     self.imports.deinit(allocator);
+
+    self.* = .{};
 }
 
 const std = @import("std");

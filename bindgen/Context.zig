@@ -1,6 +1,9 @@
 const Context = @This();
 
+const logger = std.log.scoped(.context);
+
 pub const Builtin = @import("Context/Builtin.zig");
+pub const Class = @import("Context/Class.zig");
 pub const Constant = @import("Context/Constant.zig");
 pub const Enum = @import("Context/Enum.zig");
 pub const Flag = @import("Context/Flag.zig");
@@ -8,10 +11,12 @@ pub const Field = @import("Context/Field.zig");
 pub const Function = @import("Context/Function.zig");
 pub const Imports = @import("Context/Imports.zig");
 pub const Module = @import("Context/Module.zig");
+pub const Property = @import("Context/Property.zig");
+pub const Signal = @import("Context/Signal.zig");
 pub const Type = @import("Context/type.zig").Type;
+pub const DocumentContext = @import("Context/docs.zig").DocumentContext;
 
-/// @deprecated: prefer passing allocator
-allocator: Allocator,
+arena: *ArenaAllocator,
 api: GodotApi,
 config: Config,
 
@@ -31,9 +36,12 @@ function_imports: StringHashMap(Imports) = .empty,
 
 builtins: StringArrayHashMap(Builtin) = .empty,
 builtin_sizes: StringArrayHashMap(struct { size: usize, members: StringArrayHashMap(struct { offset: usize, meta: []const u8 }) }) = .empty,
+classes: StringArrayHashMap(Class) = .empty,
 enums: StringArrayHashMap(Enum) = .empty,
 flags: StringArrayHashMap(Flag) = .empty,
 modules: StringArrayHashMap(Module) = .empty,
+
+symbol_lookup: StringHashMap([]const u8) = .empty,
 
 const func_case: case.Case = .camel;
 
@@ -51,93 +59,89 @@ const base_type_map = std.StaticStringMap([]const u8).initComptime(.{
     .{ "double", "f64" },
 });
 
-pub fn build(allocator: Allocator, api: GodotApi, config: Config) !Context {
+pub fn build(arena: *ArenaAllocator, api: GodotApi, config: Config) !Context {
     var self = Context{
-        .allocator = allocator,
+        .arena = arena,
         .api = api,
         .config = config,
     };
+
+    try self.buildSymbolLookupTable();
 
     try self.parseGdExtensionHeaders();
     try self.parseSingletons();
     try self.parseClasses();
 
-    try self.collectSizes(allocator);
+    try self.collectSizes();
 
-    try self.castBuiltins(allocator);
-    try self.castEnums(allocator);
-    try self.castFlags(allocator);
-    try self.castModules(allocator);
+    try self.castBuiltins();
+    try self.castClasses();
+    try self.castEnums();
+    try self.castFlags();
+    try self.castModules();
 
-    try self.collectExports(allocator);
-    try self.collectImports(allocator);
+    try self.collectExports();
+    try self.collectImports();
 
     return self;
 }
 
-pub fn deinit(self: *Context) void {
-    self.all_classes.deinit(self.allocator);
-    self.all_engine_classes.deinit(self.allocator);
-    self.builtin_sizes.deinit(self.allocator);
-    self.depends.deinit(self.allocator);
-    self.engine_classes.deinit(self.allocator);
-    self.func_docs.deinit(self.allocator);
-    self.func_names.deinit(self.allocator);
-    self.func_pointers.deinit(self.allocator);
-    self.singletons.deinit(self.allocator);
-    self.builtin_imports.deinit(self.allocator);
-    self.class_index.deinit(self.allocator);
-    self.class_imports.deinit(self.allocator);
-    self.function_imports.deinit(self.allocator);
+pub fn allocator(self: *const Context) Allocator {
+    return self.arena.allocator();
+}
 
-    for (self.enums.items) |@"enum"| {
-        @"enum".deinit(self.allocator);
-    }
-    self.enums.deinit(self.allocator);
-
-    for (self.flags.items) |flag| {
-        flag.deinit(self.allocator);
-    }
-    self.flags.deinit(self.allocator);
-
-    for (self.modules.items) |module| {
-        module.deinit(self.allocator);
-    }
-    self.modules.deinit(self.allocator);
+pub fn rawAllocator(self: *const Context) Allocator {
+    return self.arena.child_allocator;
 }
 
 /// This function generates a list of types/modules to re-export in core.zig
-fn collectExports(self: *Context, allocator: Allocator) !void {
-    try self.core_exports.append(allocator, .{
+fn collectExports(self: *Context) !void {
+    try self.core_exports.append(self.allocator(), .{
         .ident = "global",
         .file = "global",
     });
 
-    for (self.api.builtin_classes) |builtin| {
+    for (self.builtins.values()) |*builtin| {
         if (util.shouldSkipClass(builtin.name)) {
             continue;
         }
-        try self.core_exports.append(allocator, .{
+        try self.core_exports.append(self.allocator(), .{
             .ident = builtin.name,
             .file = builtin.name,
             .path = builtin.name,
         });
     }
 
-    for (self.api.classes) |class| {
+    for (self.classes.values()) |*class| {
         if (util.shouldSkipClass(class.name)) {
             continue;
         }
-        try self.core_exports.append(allocator, .{
+        try self.core_exports.append(self.allocator(), .{
             .ident = class.name,
             .file = class.name,
             .path = class.name,
         });
-        try self.all_engine_classes.append(allocator, class.name);
+        try self.all_engine_classes.append(self.allocator(), class.name);
+    }
+
+    for (self.enums.values()) |@"enum"| {
+        try self.core_exports.append(self.allocator(), .{
+            .ident = @"enum".name,
+            .file = "global",
+            .path = @"enum".name,
+        });
+    }
+
+    for (self.flags.values()) |flag| {
+        try self.core_exports.append(self.allocator(), .{
+            .ident = flag.name,
+            .file = "global",
+            .path = flag.name,
+        });
     }
 
     for (self.modules.values()) |module| {
-        try self.core_exports.append(allocator, .{
+        try self.core_exports.append(self.allocator(), .{
             .ident = module.name,
             .file = module.name,
             .path = null,
@@ -145,106 +149,113 @@ fn collectExports(self: *Context, allocator: Allocator) !void {
     }
 }
 
-fn collectImports(self: *Context, allocator: Allocator) !void {
+fn collectImports(self: *Context) !void {
     for (self.api.builtin_classes) |builtin| {
-        try self.collectBuiltinImports(allocator, builtin);
+        try self.collectBuiltinImports(builtin);
     }
     for (self.api.classes, 0..) |class, i| {
-        try self.class_index.put(allocator, class.name, i);
+        try self.class_index.put(self.allocator(), class.name, i);
     }
     for (self.api.classes) |class| {
-        try self.collectClassImports(allocator, class);
+        try self.collectClassImports(self.classes.getPtr(class.name).?);
     }
     for (self.api.utility_functions) |function| {
-        try self.collectFunctionImports(allocator, function);
+        try self.collectFunctionImports(function);
     }
 }
 
-fn collectBuiltinImports(self: *Context, allocator: Allocator, builtin: GodotApi.Builtin) !void {
+fn collectBuiltinImports(self: *Context, builtin: GodotApi.Builtin) !void {
     if (self.builtin_imports.contains(builtin.name)) return;
 
     var imports: Imports = .empty;
     imports.skip = builtin.name;
 
     for (builtin.constants orelse &.{}) |constant| {
-        try imports.put(allocator, self.correctType(constant.type, ""));
+        try imports.put(self.allocator(), self.correctType(constant.type, ""));
     }
     for (builtin.constructors) |constructor| {
         for (constructor.arguments orelse &.{}) |argument| {
-            try imports.put(allocator, self.correctType(argument.type, ""));
+            try imports.put(self.allocator(), self.correctType(argument.type, ""));
         }
     }
     for (builtin.members orelse &.{}) |member| {
-        try imports.put(allocator, self.correctType(member.type, ""));
+        try imports.put(self.allocator(), self.correctType(member.type, ""));
     }
     for (builtin.methods orelse &.{}) |method| {
-        try imports.put(allocator, self.correctType(method.return_type, ""));
+        try imports.put(self.allocator(), self.correctType(method.return_type, ""));
         for (method.arguments orelse &.{}) |argument| {
-            try imports.put(allocator, self.correctType(argument.type, ""));
+            try imports.put(self.allocator(), self.correctType(argument.type, ""));
         }
     }
     for (builtin.operators) |operator| {
-        try imports.put(allocator, self.correctType(operator.right_type, ""));
-        try imports.put(allocator, self.correctType(operator.return_type, ""));
+        try imports.put(self.allocator(), self.correctType(operator.right_type, ""));
+        try imports.put(self.allocator(), self.correctType(operator.return_type, ""));
     }
 
-    try self.builtin_imports.put(allocator, builtin.name, imports);
+    try self.builtin_imports.put(self.allocator(), builtin.name, imports);
 
     if (self.builtins.getPtr(builtin.name)) |context_builtin| {
-        try context_builtin.imports.merge(allocator, &imports);
+        try context_builtin.imports.merge(self.allocator(), &imports);
     }
 }
 
-fn collectClassImports(self: *Context, allocator: Allocator, class: GodotApi.Class) !void {
-    if (self.class_imports.contains(class.name)) return;
+fn collectClassImports(self: *Context, class: *Class) !void {
+    if (class.imports.map.count() > 0) return;
+    class.imports.skip = class.name;
 
-    var imports: Imports = .empty;
-    imports.skip = class.name;
-
-    for (class.methods orelse &.{}) |method| {
-        if (method.return_value) |return_value| {
-            try imports.put(allocator, self.correctType(return_value.type, return_value.meta));
-        }
-        for (method.arguments orelse &.{}) |argument| {
-            try imports.put(allocator, self.correctType(argument.type, argument.meta));
+    for (class.functions.values()) |function| {
+        try self.typeImport(&class.imports, &function.return_type);
+        for (function.parameters.values()) |parameter| {
+            try self.typeImport(&class.imports, &parameter.type);
         }
     }
-    for (class.properties orelse &.{}) |_| {
-        // TODO: deal with comma separated "CanvasItemMaterial,ShaderMaterial"
-        // try imports.put(allocator, self.correctType(property.type, ""));
+    for (class.properties.values()) |property| {
+        try self.typeImport(&class.imports, &property.type);
     }
-    for (class.signals orelse &.{}) |signal| {
-        for (signal.arguments orelse &.{}) |argument| {
-            try imports.put(allocator, self.correctType(argument.type, ""));
+    for (class.signals.values()) |signal| {
+        for (signal.parameters.values()) |parameter| {
+            try self.typeImport(&class.imports, &parameter.type);
         }
     }
 
     // Index imports from the parent class hierarchy
-    var cur = class;
-    while (cur.inherits.len > 0) {
-        const idx = self.class_index.get(cur.inherits).?;
-        cur = self.api.classes[idx];
-        try self.collectClassImports(allocator, cur);
-        try imports.put(allocator, cur.name);
-        try imports.merge(allocator, &self.class_imports.get(cur.name).?);
+    if (class.getBasePtr(self)) |base| {
+        try self.collectClassImports(base);
+        try class.imports.put(self.allocator(), base.name);
+        try class.imports.merge(self.allocator(), &base.imports);
     }
-
-    try self.class_imports.put(allocator, class.name, imports);
 }
 
-fn collectFunctionImports(self: *Context, allocator: Allocator, function: GodotApi.UtilityFunction) !void {
+fn typeImport(self: *Context, imports: *Imports, @"type": *const Type) !void {
+    switch (@"type".*) {
+        .array => try imports.put(self.allocator(), "Array"),
+        .basic => |name| try imports.put(self.allocator(), name),
+        .class => |name| try imports.put(self.allocator(), name),
+        .@"enum" => |name| try imports.put(self.allocator(), name),
+        .flag => |name| try imports.put(self.allocator(), name),
+        .pointer => |child| try self.typeImport(imports, child),
+        .string => try imports.put(self.allocator(), "String"),
+        .string_name => try imports.put(self.allocator(), "StringName"),
+        .node_path => try imports.put(self.allocator(), "NodePath"),
+        .@"union" => {},
+        .variant => try imports.put(self.allocator(), "Variant"),
+        .void => {},
+    }
+}
+
+fn collectFunctionImports(self: *Context, function: GodotApi.UtilityFunction) !void {
     var imports: Imports = .empty;
-    try imports.put(allocator, function.return_type);
+    try imports.put(self.allocator(), function.return_type);
 
     for (function.arguments orelse &.{}) |argument| {
-        try imports.put(allocator, argument.type);
+        try imports.put(self.allocator(), argument.type);
     }
 
     // TODO: remove function_imports
     var module = self.modules.getPtr(function.category).?;
-    try module.imports.merge(allocator, &imports);
+    try module.imports.merge(self.allocator(), &imports);
 
-    try self.function_imports.put(allocator, function.name, imports);
+    try self.function_imports.put(self.allocator(), function.name, imports);
 }
 
 fn parseClasses(self: *Context) !void {
@@ -253,17 +264,17 @@ fn parseClasses(self: *Context) !void {
         if (std.mem.eql(u8, bc.name, "ClassDB")) {
             continue;
         }
-        try self.engine_classes.put(self.allocator, bc.name, bc.is_refcounted);
+        try self.engine_classes.put(self.allocator(), bc.name, bc.is_refcounted);
     }
 
     for (self.api.native_structures) |ns| {
-        try self.engine_classes.put(self.allocator, ns.name, false);
+        try self.engine_classes.put(self.allocator(), ns.name, false);
     }
 }
 
 fn parseSingletons(self: *Context) !void {
     for (self.api.singletons) |sg| {
-        try self.singletons.put(self.allocator, sg.name, sg.type);
+        try self.singletons.put(self.allocator(), sg.name, sg.type);
     }
 }
 
@@ -279,7 +290,7 @@ fn parseGdExtensionHeaders(self: *Context) !void {
     const safe_ident_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
 
     var doc_stream: std.ArrayListUnmanaged(u8) = .empty;
-    const doc_writer: std.ArrayListUnmanaged(u8).Writer = doc_stream.writer(self.allocator);
+    const doc_writer: std.ArrayListUnmanaged(u8).Writer = doc_stream.writer(self.allocator());
 
     var doc_start: ?usize = null;
     var doc_end: ?usize = null;
@@ -316,7 +327,7 @@ fn parseGdExtensionHeaders(self: *Context) !void {
 
                 if (!contains_name_doc and !(is_last_line and doc_line.len == 0)) {
                     try doc_writer.writeAll("/// ");
-                    try doc_writer.writeAll(try self.allocator.dupe(u8, doc_line));
+                    try doc_writer.writeAll(try self.allocator().dupe(u8, doc_line));
                     try doc_writer.writeAll("\n");
                 }
 
@@ -330,7 +341,7 @@ fn parseGdExtensionHeaders(self: *Context) !void {
         if (contains_name_doc) {
             const name_index = std.mem.indexOf(u8, line, name_doc).?;
             const start = name_index + name_doc.len + 1; // +1 to skip the space after @name
-            fn_name = try self.allocator.dupe(u8, line[start..]);
+            fn_name = try self.allocator().dupe(u8, line[start..]);
             fp_type = null;
         } else if (std.mem.startsWith(u8, line, "typedef")) {
             if (fn_name == null) continue; // skip if we don't have a function name yet
@@ -346,15 +357,15 @@ fn parseGdExtensionHeaders(self: *Context) !void {
             const fp_type_slice = iterator.next().?;
             const start = std.mem.indexOfAny(u8, fp_type_slice, safe_ident_chars).?;
             const end = std.mem.indexOf(u8, fp_type_slice[start..], ")").?;
-            fp_type = try self.allocator.dupe(u8, fp_type_slice[start..(end + start)]);
+            fp_type = try self.allocator().dupe(u8, fp_type_slice[start..(end + start)]);
         }
 
         if (fn_name) |_| if (fp_type) |_| {
-            try self.func_pointers.put(self.allocator, fp_type.?, fn_name.?);
+            try self.func_pointers.put(self.allocator(), fp_type.?, fn_name.?);
 
             if (doc_start) |start_index| if (doc_end) |end_index| {
-                const doc_text = try self.allocator.dupe(u8, doc_stream.items[start_index..end_index]);
-                try self.func_docs.put(self.allocator, fp_type.?, doc_text);
+                const doc_text = try self.allocator().dupe(u8, doc_stream.items[start_index..end_index]);
+                try self.func_docs.put(self.allocator(), fp_type.?, doc_text);
             };
 
             fn_name = null;
@@ -365,14 +376,14 @@ fn parseGdExtensionHeaders(self: *Context) !void {
     }
 }
 
-fn collectSizes(self: *Context, allocator: Allocator) !void {
+fn collectSizes(self: *Context) !void {
     // Update size for all builtins
     for (self.api.builtin_class_sizes) |config| {
         if (!std.mem.eql(u8, config.build_configuration, self.config.buildConfiguration())) {
             continue;
         }
         for (config.sizes) |info| {
-            try self.builtin_sizes.put(allocator, info.name, .{
+            try self.builtin_sizes.put(self.allocator(), info.name, .{
                 .size = @intCast(info.size),
                 .members = .empty,
             });
@@ -387,7 +398,7 @@ fn collectSizes(self: *Context, allocator: Allocator) !void {
         for (config.classes) |builtin_config| {
             const builtin = self.builtin_sizes.getPtr(builtin_config.name).?;
             for (builtin_config.members) |member_config| {
-                try builtin.members.put(allocator, member_config.member, .{
+                try builtin.members.put(self.allocator(), member_config.member, .{
                     .offset = @intCast(member_config.offset),
                     .meta = member_config.meta,
                 });
@@ -396,38 +407,60 @@ fn collectSizes(self: *Context, allocator: Allocator) !void {
     }
 }
 
-fn castBuiltins(self: *Context, allocator: Allocator) !void {
+fn castBuiltins(self: *Context) !void {
     for (self.api.builtin_classes) |builtin| {
-        try self.builtins.put(allocator, builtin.name, try .init(allocator, builtin, self));
+        try self.builtins.put(self.allocator(), builtin.name, try .fromApi(self.allocator(), builtin, self));
     }
 }
 
-fn castEnums(self: *Context, allocator: Allocator) !void {
+fn castClasses(self: *Context) !void {
+    for (self.api.classes) |class| {
+        try self.castClass(class);
+    }
+}
+
+fn castClass(self: *Context, class: GodotApi.Class) !void {
+    // Assemble parent classes first
+    if (self.api.findClass(class.inherits)) |base| {
+        if (!self.classes.contains(base.name)) {
+            try self.castClass(base);
+        }
+    }
+    try self.classes.put(self.allocator(), class.name, try .fromApi(self.allocator(), class, self));
+}
+
+fn castEnums(self: *Context) !void {
     for (self.api.global_enums) |@"enum"| {
         if (@"enum".is_bitfield) {
             continue;
         }
-        try self.enums.put(allocator, @"enum".name, try .fromGlobalEnum(allocator, @"enum", self));
+        if (std.mem.startsWith(u8, @"enum".name, "Variant.")) {
+            continue;
+        }
+        try self.enums.put(self.allocator(), @"enum".name, try .fromGlobalEnum(self.allocator(), null, @"enum", self));
     }
 }
 
-fn castFlags(self: *Context, allocator: Allocator) !void {
+fn castFlags(self: *Context) !void {
     for (self.api.global_enums) |@"enum"| {
         if (!@"enum".is_bitfield) {
             continue;
         }
-        try self.flags.put(allocator, @"enum".name, try .fromGlobalEnum(allocator, @"enum", self));
+        if (std.mem.startsWith(u8, @"enum".name, "Variant.")) {
+            continue;
+        }
+        try self.flags.put(self.allocator(), @"enum".name, try .fromGlobalEnum(self.allocator(), null, @"enum", self));
     }
 }
 
-fn castModules(self: *Context, allocator: Allocator) !void {
+fn castModules(self: *Context) !void {
     // This logic is a dumb way to group utility functions into modules
     var cur: ?*Module = null;
     for (self.api.utility_functions) |function| {
-        const entry = try self.modules.getOrPut(allocator, function.category);
+        const entry = try self.modules.getOrPut(self.allocator(), function.category);
         cur = entry.value_ptr;
         if (!entry.found_existing) {
-            cur.?.* = try .init(allocator, function.category);
+            cur.?.* = try .init(self.allocator(), function.category);
         }
     }
     var i: usize = 0;
@@ -438,15 +471,15 @@ fn castModules(self: *Context, allocator: Allocator) !void {
                 i = j;
                 break;
             }
-            try functions.append(allocator, try .fromUtilityFunction(allocator, function, self));
+            try functions.append(self.allocator(), try .fromUtilityFunction(self.allocator(), function, self));
         }
-        module.*.functions = try functions.toOwnedSlice(allocator);
+        module.*.functions = try functions.toOwnedSlice(self.allocator());
     }
 }
 
 pub fn correctName(self: *const Context, name: []const u8) []const u8 {
     if (std.zig.Token.keywords.has(name)) {
-        return std.fmt.allocPrint(self.allocator, "@\"{s}\"", .{name}) catch unreachable;
+        return std.fmt.allocPrint(self.arena.allocator(), "@\"{s}\"", .{name}) catch unreachable;
     }
 
     return name;
@@ -470,7 +503,7 @@ pub fn correctType(self: *const Context, type_name: []const u8, meta: []const u8
     } else if (util.isEnum(correct_type)) {
         const cls = util.getEnumClass(correct_type);
         if (std.mem.eql(u8, cls, "GlobalConstants")) {
-            return std.fmt.allocPrint(self.allocator, "global.{s}", .{util.getEnumName(correct_type)}) catch unreachable;
+            return std.fmt.allocPrint(self.allocator(), "global.{s}", .{util.getEnumName(correct_type)}) catch unreachable;
         } else {
             return util.getEnumName(correct_type);
         }
@@ -481,11 +514,11 @@ pub fn correctType(self: *const Context, type_name: []const u8, meta: []const u8
     }
 
     if (self.isRefCounted(correct_type)) {
-        return std.fmt.allocPrint(self.allocator, "?{s}", .{correct_type}) catch unreachable;
+        return std.fmt.allocPrint(self.allocator(), "?{s}", .{correct_type}) catch unreachable;
     } else if (self.isClass(correct_type)) {
-        return std.fmt.allocPrint(self.allocator, "?{s}", .{correct_type}) catch unreachable;
+        return std.fmt.allocPrint(self.allocator(), "?{s}", .{correct_type}) catch unreachable;
     } else if (correct_type[correct_type.len - 1] == '*') {
-        return std.fmt.allocPrint(self.allocator, "?*{s}", .{correct_type[0 .. correct_type.len - 1]}) catch unreachable;
+        return std.fmt.allocPrint(self.allocator(), "?*{s}", .{correct_type[0 .. correct_type.len - 1]}) catch unreachable;
     }
     return correct_type;
 }
@@ -520,10 +553,10 @@ pub fn getReturnType(self: *const Context, method: GodotApi.GdMethod) []const u8
 }
 
 pub fn getZigFuncName(self: *Context, godot_func_name: []const u8) []const u8 {
-    const result = self.func_names.getOrPut(self.allocator, godot_func_name) catch unreachable;
+    const result = self.func_names.getOrPut(self.allocator(), godot_func_name) catch unreachable;
 
     if (!result.found_existing) {
-        result.value_ptr.* = self.correctName(case.allocTo(self.allocator, func_case, godot_func_name) catch unreachable);
+        result.value_ptr.* = self.correctName(case.allocTo(self.allocator(), func_case, godot_func_name) catch unreachable);
     }
 
     return result.value_ptr.*;
@@ -532,7 +565,7 @@ pub fn getZigFuncName(self: *Context, godot_func_name: []const u8) []const u8 {
 pub fn getVariantTypeName(self: *const Context, class_name: []const u8) []const u8 {
     var buf: [256]u8 = undefined;
     const nnn = case.bufTo(&buf, .snake, class_name) catch unreachable;
-    return std.fmt.allocPrint(self.allocator, "godot.c.GDEXTENSION_VARIANT_TYPE_{s}", .{std.ascii.upperString(&buf, nnn)}) catch unreachable;
+    return std.fmt.allocPrint(self.arena.allocator(), "godot.c.GDEXTENSION_VARIANT_TYPE_{s}", .{std.ascii.upperString(&buf, nnn)}) catch unreachable;
 }
 
 pub fn isRefCounted(self: *const Context, type_name: []const u8) bool {
@@ -552,9 +585,63 @@ pub fn isSingleton(self: *const Context, class_name: []const u8) bool {
     return self.singletons.contains(class_name);
 }
 
+pub fn buildSymbolLookupTable(self: *Context) !void {
+    if (self.symbol_lookup.size == 0) {
+        logger.debug("Initializing symbol lookup...", .{});
+
+        try self.symbol_lookup.putNoClobber(self.allocator(), "Variant", "Variant");
+
+        for (self.api.classes) |class| {
+            if (util.shouldSkipClass(class.name)) continue;
+
+            const doc_name = try std.fmt.allocPrint(self.allocator(), "bindings.core.{s}", .{class.name});
+            try self.symbol_lookup.putNoClobber(self.allocator(), class.name, doc_name);
+
+            for (class.enums orelse &.{}) |@"enum"| {
+                const enum_name = try std.fmt.allocPrint(self.allocator(), "{s}.{s}", .{ class.name, @"enum".name });
+                const enum_doc_name = try std.fmt.allocPrint(self.allocator(), "{s}.{s}", .{ doc_name, enum_name });
+                try self.symbol_lookup.putNoClobber(self.allocator(), enum_name, enum_doc_name);
+            }
+
+            for (class.methods orelse &.{}) |method| {
+                const method_name = try std.fmt.allocPrint(self.allocator(), "{s}.{s}", .{ class.name, method.name });
+                const method_doc_name = try std.fmt.allocPrint(self.allocator(), "{s}.{s}", .{ doc_name, method.name });
+                try self.symbol_lookup.putNoClobber(self.allocator(), method_name, method_doc_name);
+            }
+        }
+
+        for (self.api.builtin_classes) |builtin| {
+            if (util.shouldSkipClass(builtin.name)) continue;
+
+            const doc_name = try std.fmt.allocPrint(self.allocator(), "bindings.core.{s}", .{builtin.name});
+            try self.symbol_lookup.putNoClobber(self.allocator(), builtin.name, doc_name);
+
+            for (builtin.enums orelse &.{}) |@"enum"| {
+                const enum_name = try std.fmt.allocPrint(self.allocator(), "{s}.{s}", .{ builtin.name, @"enum".name });
+                const enum_doc_name = try std.fmt.allocPrint(self.allocator(), "{s}.{s}", .{ doc_name, enum_name });
+                try self.symbol_lookup.putNoClobber(self.allocator(), enum_name, enum_doc_name);
+            }
+
+            for (builtin.methods orelse &.{}) |method| {
+                const method_name = try std.fmt.allocPrint(self.allocator(), "{s}.{s}", .{ builtin.name, method.name });
+                const method_doc_name = try std.fmt.allocPrint(self.allocator(), "{s}.{s}", .{ doc_name, method.name });
+                try self.symbol_lookup.putNoClobber(self.allocator(), method_name, method_doc_name);
+            }
+        }
+
+        for (self.api.global_enums) |@"enum"| {
+            const doc_name = try std.fmt.allocPrint(self.allocator(), "bindings.global.{s}", .{@"enum".name});
+            try self.symbol_lookup.putNoClobber(self.allocator(), @"enum".name, doc_name);
+        }
+
+        logger.debug("Symbol lookup initialized. Size: {d}", .{self.symbol_lookup.size});
+    }
+}
+
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayListUnmanaged;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const StringHashMap = std.StringHashMapUnmanaged;
 const StringArrayHashMap = std.StringArrayHashMapUnmanaged;
 

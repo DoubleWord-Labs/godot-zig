@@ -16,13 +16,30 @@ pub fn fromBuiltin(allocator: Allocator, api: GodotApi.Builtin.Enum) !Enum {
     return self;
 }
 
-pub fn fromGlobalEnum(allocator: Allocator, api: GodotApi.GlobalEnum, ctx: *const Context) !Enum {
+pub fn fromClass(allocator: Allocator, class_name: []const u8, api: GodotApi.Class.Enum, ctx: *const Context) !Enum {
     var self: Enum = .{};
     errdefer self.deinit(allocator);
 
     self.name = try allocator.dupe(u8, api.name);
     for (api.values) |value| {
-        const desc = if (value.description) |d| try docs.convertDocsToMarkdown(allocator, d, ctx) else null;
+        const desc = if (value.description) |d| try docs.convertDocsToMarkdown(allocator, d, ctx, .{
+            .current_class = class_name,
+        }) else null;
+        try self.values.put(allocator, value.name, try .init(allocator, desc, value.name, value.value));
+    }
+
+    return self;
+}
+
+pub fn fromGlobalEnum(allocator: Allocator, class_name: ?[]const u8, api: GodotApi.GlobalEnum, ctx: *const Context) !Enum {
+    var self: Enum = .{};
+    errdefer self.deinit(allocator);
+
+    self.name = try allocator.dupe(u8, api.name);
+    for (api.values) |value| {
+        const desc = if (value.description) |d| try docs.convertDocsToMarkdown(allocator, d, ctx, .{
+            .current_class = class_name,
+        }) else null;
         try self.values.put(allocator, value.name, try .init(allocator, desc, value.name, value.value));
     }
 
@@ -37,6 +54,8 @@ pub fn deinit(self: *Enum, allocator: Allocator) void {
         value.deinit(allocator);
     }
     self.values.deinit(allocator);
+
+    self.* = .{};
 }
 
 pub const Value = struct {
@@ -58,6 +77,8 @@ pub const Value = struct {
     pub fn deinit(self: *Value, allocator: Allocator) void {
         if (self.doc) |doc| allocator.free(doc);
         allocator.free(self.name);
+
+        self.* = .{};
     }
 };
 

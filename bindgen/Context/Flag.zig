@@ -1,34 +1,25 @@
 const Flag = @This();
 
 doc: ?[]const u8 = null,
-name: []const u8,
-fields: []Field = &.{},
-consts: []Const = &.{},
+name: []const u8 = "_",
+fields: StringArrayHashMap(Field) = .empty,
+consts: StringArrayHashMap(Const) = .empty,
 padding: u8 = 0,
+representation: enum { u32, u64 } = .u32,
 
-pub fn fromGlobalEnum(allocator: Allocator, api: GodotApi.GlobalEnum, ctx: *const Context) !Flag {
-    const doc = null;
+pub fn fromGlobalEnum(allocator: Allocator, class_name: ?[]const u8, api: GodotApi.GlobalEnum, ctx: *const Context) !Flag {
+    var self: Flag = .{};
+    errdefer self.deinit(allocator);
 
-    const name = if (std.mem.endsWith(u8, api.name, "Flags"))
-        try allocator.dupe(u8, api.name[0 .. api.name.len - "Flags".len])
-    else if (std.mem.endsWith(u8, api.name, "Flag"))
-        try allocator.dupe(u8, api.name[0 .. api.name.len - "Flag".len])
-    else
-        try allocator.dupe(u8, api.name);
-    errdefer allocator.free(name);
-
-    var fields: ArrayList(Field) = .empty;
-    errdefer fields.deinit(allocator);
-
-    var consts: ArrayList(Const) = .empty;
-    errdefer consts.deinit(allocator);
+    self.name = try allocator.dupe(u8, api.name);
 
     var default: i64 = 0;
     var position: u8 = 0;
+
     for (api.values) |value| {
         if (std.mem.endsWith(u8, value.name, "_DEFAULT")) {
             default = value.value;
-            try consts.append(allocator, try .fromGlobalEnum(allocator, value, ctx));
+            try self.consts.put(allocator, value.name, try .fromGlobalEnum(allocator, class_name, value, ctx));
             continue;
         }
 
@@ -37,50 +28,61 @@ pub fn fromGlobalEnum(allocator: Allocator, api: GodotApi.GlobalEnum, ctx: *cons
 
             // Fill in any missing bit positions with placeholder fields
             while (position < expected_position) : (position += 1) {
-                try fields.append(allocator, .{
-                    .doc = null,
-                    .name = try std.fmt.allocPrint(allocator, "@\"{d}\"", .{position}),
-                    .default = false,
+                if (ctx.config.verbosity == .verbose) {
+                    std.debug.print("{s} expected position: {} Actual: {}\n", .{ self.name, expected_position, position });
+                }
+                const name = try std.fmt.allocPrint(allocator, "@\"{d}\"", .{position});
+                try self.fields.put(allocator, name, .{
+                    .name = name,
                 });
             }
 
             // Add the field at the correct bit position
-            try fields.append(allocator, try .fromGlobalEnum(allocator, value, ctx, default));
+            try self.fields.put(allocator, value.name, try .fromGlobalEnum(allocator, class_name, value, ctx, default));
             position += 1;
         } else {
-            try consts.append(allocator, try .fromGlobalEnum(allocator, value, ctx));
+            try self.consts.put(allocator, value.name, try .fromGlobalEnum(allocator, class_name, value, ctx));
         }
     }
 
-    return .{
-        .doc = doc,
-        .name = name,
-        .fields = try fields.toOwnedSlice(allocator),
-        .consts = try consts.toOwnedSlice(allocator),
-        .padding = 32 - position,
+    if (position > 32) {
+        self.representation = .u64;
+    }
+
+    self.padding = switch (self.representation) {
+        .u32 => 32 - position,
+        .u64 => 64 - position,
     };
+
+    return self;
 }
 
 pub fn deinit(self: *Flag, allocator: Allocator) void {
     if (self.doc) |doc| allocator.free(doc);
     allocator.free(self.name);
-    for (self.fields) |value| {
+
+    for (self.fields.values()) |*value| {
         value.deinit(allocator);
     }
-    allocator.free(self.fields);
-    for (self.consts) |@"const"| {
+    self.fields.deinit(allocator);
+
+    for (self.consts.values()) |*@"const"| {
         @"const".deinit(allocator);
     }
-    allocator.free(self.consts);
+    self.consts.deinit(allocator);
+
+    self.* = .{};
 }
 
 pub const Field = struct {
-    doc: ?[]const u8,
-    name: []const u8,
-    default: bool,
+    doc: ?[]const u8 = null,
+    name: []const u8 = "_",
+    default: bool = false,
 
-    pub fn fromGlobalEnum(allocator: Allocator, api: GodotApi.GlobalEnum.Value, ctx: *const Context, default: i64) !Field {
-        const doc = if (api.description) |desc| try docs.convertDocsToMarkdown(allocator, desc, ctx) else null;
+    pub fn fromGlobalEnum(allocator: Allocator, class_name: ?[]const u8, api: GodotApi.GlobalEnum.Value, ctx: *const Context, default: i64) !Field {
+        const doc = if (api.description) |desc| try docs.convertDocsToMarkdown(allocator, desc, ctx, .{
+            .current_class = class_name,
+        }) else null;
         errdefer allocator.free(doc orelse "");
 
         const name = try case.allocTo(allocator, .snake, api.name);
@@ -94,18 +96,22 @@ pub const Field = struct {
     }
 
     pub fn deinit(self: *Field, allocator: Allocator) void {
-        allocator.free(self.doc);
+        if (self.doc) |doc| allocator.free(doc);
         allocator.free(self.name);
+
+        self.* = .{};
     }
 };
 
 pub const Const = struct {
     doc: ?[]const u8 = null,
-    name: []const u8,
-    value: i64,
+    name: []const u8 = "_",
+    value: i64 = 0,
 
-    pub fn fromGlobalEnum(allocator: Allocator, api: GodotApi.GlobalEnum.Value, ctx: *const Context) !Const {
-        const doc = if (api.description) |desc| try docs.convertDocsToMarkdown(allocator, desc, ctx) else null;
+    pub fn fromGlobalEnum(allocator: Allocator, class_name: ?[]const u8, api: GodotApi.GlobalEnum.Value, ctx: *const Context) !Const {
+        const doc = if (api.description) |desc| try docs.convertDocsToMarkdown(allocator, desc, ctx, .{
+            .current_class = class_name,
+        }) else null;
         errdefer allocator.free(doc orelse "");
 
         const name = try case.allocTo(allocator, .snake, api.name);
@@ -119,14 +125,16 @@ pub const Const = struct {
     }
 
     pub fn deinit(self: *Const, allocator: Allocator) void {
-        allocator.free(self.doc);
+        if (self.doc) |doc| allocator.free(doc);
         allocator.free(self.name);
+
+        self.* = .{};
     }
 };
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const ArrayList = std.ArrayListUnmanaged;
+const StringArrayHashMap = std.StringArrayHashMapUnmanaged;
 const Context = @import("../Context.zig");
 
 const case = @import("case");

@@ -88,7 +88,7 @@ pub fn upcast(comptime T: type, value: anytype) T {
     }
 }
 
-pub fn downcast(comptime T: type, value: anytype) T {
+pub fn downcast(comptime T: type, value: anytype) ?T {
     _ = value;
     @panic("todo: fieldParentPtr-based casting");
 }
@@ -127,9 +127,7 @@ pub fn Deref(comptime T: type) type {
 }
 
 const std = @import("std");
-const debug = std.debug;
 const fmt = std.fmt;
-const mem = std.mem;
 const Tuple = std.meta.Tuple;
 
 const godot = @import("root.zig");
