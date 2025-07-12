@@ -185,6 +185,19 @@ fn writeBuiltin(w: *Writer, builtin: *const Context.Builtin, ctx: *const Context
         try w.writeLine("");
     }
 
+    // Helpers
+    try w.printLine(
+        \\/// Returns an opaque pointer to the {0s}.
+        \\pub fn ptr(self: *{0s}) *anyopaque {{
+        \\    return @ptrCast(*anyopaque, self);
+        \\}}
+        \\
+        \\/// Returns a constant opaque pointer to the {0s}.
+        \\pub fn constPtr(self: *const {0s}) *const anyopaque {{
+        \\    return @ptrCast(*const anyopaque, self);
+        \\}}
+    , .{builtin.name});
+
     // Declaration end
     w.indent -= 1;
     try w.writeLine("};");
@@ -477,6 +490,19 @@ fn writeClass(w: *Writer, class: *const Context.Class, ctx: *const Context) !voi
         try writeFlag(w, flag);
         try w.writeLine("");
     }
+
+    // Helpers
+    try w.printLine(
+        \\/// Returns an opaque pointer to the {0s}.
+        \\pub fn ptr(self: *{0s}) *anyopaque {{
+        \\    return @ptrCast(*anyopaque, self);
+        \\}}
+        \\
+        \\/// Returns a constant opaque pointer to the {0s}.
+        \\pub fn constPtr(self: *const {0s}) *const anyopaque {{
+        \\    return @ptrCast(*const anyopaque, self);
+        \\}}
+    , .{class.name});
 
     // Declaration end
     w.indent -= 1;
